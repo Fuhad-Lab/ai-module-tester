@@ -1,21 +1,6 @@
 /**
  * AI Module Tester & Creator — Blue Horizon E-Learning
- * 
- * This service runs on Render. It provides:
- *  1. AI module generation/editing via Kimi K2.6 (NVIDIA API)
- *  2. Live browser preview via Playwright (for AI visual testing)
- * 
- * Security: The KIMI_API_KEY is stored as a Render environment variable
- * and NEVER exposed to the frontend. The Supabase edge function
- * `ai-module` proxies requests to this service.
- * 
- * Endpoints:
- *  POST /generate  — AI generates module HTML from a prompt
- *  POST /edit      — AI edits existing HTML based on instruction
- *  POST /test      — AI autonomously tests a module (Playwright)
- *  POST /start     — Load HTML into Playwright, return screenshot
- *  POST /action    — Click/type in Playwright, return screenshot
- *  GET  /health    — Health check
+ * Express + Playwright + Kimi K2.6 (NVIDIA API)
  */
 
 const express = require('express');
@@ -32,7 +17,7 @@ const MODEL = 'moonshotai/kimi-k2.6';
 const PORT = process.env.PORT || 3000;
 
 // ─── Kimi K2.6 API call ──────────────────────────────────────────────
-async function callKimi(messages, { stream = false, max_tokens = 16384 } = {}) {
+async function callKimi(messages, { max_tokens = 16384 } = {}) {
   if (!KIMI_API_KEY) throw new Error('KIMI_API_KEY not configured');
 
   const response = await fetch(KIMI_API_URL, {
@@ -48,7 +33,7 @@ async function callKimi(messages, { stream = false, max_tokens = 16384 } = {}) {
       max_tokens,
       temperature: 1.0,
       top_p: 1.0,
-      stream: false, // We don't stream — easier to handle in edge function
+      stream: false,
       chat_template_kwargs: { thinking: true },
     }),
   });
@@ -59,25 +44,39 @@ async function callKimi(messages, { stream = false, max_tokens = 16384 } = {}) {
   }
 
   const data = await response.json();
-  return data.choices?.[0]?.message?.content || '';
+  const msg = data.choices?.[0]?.message || {};
+  // Kimi K2.6 may put content in 'content' or 'reasoning_content'
+  return {
+    content: msg.content || '',
+    reasoning: msg.reasoning_content || msg.reasoning || '',
+    raw: msg,
+  };
 }
 
 // ─── Extract HTML from AI response ───────────────────────────────────
-// The AI may wrap HTML in ```html ... ``` blocks or return raw HTML.
 function extractHtml(text) {
-  // Try ```html ... ``` block first
-  const htmlMatch = text.match(/```html\s*\n?([\s\S]*?)```/i);
-  if (htmlMatch) return htmlMatch[1].trim();
-  // Try ``` ... ``` block
-  const codeMatch = text.match(/```\s*\n?([\s\S]*?)```/i);
-  if (codeMatch && codeMatch[1].includes('<')) return codeMatch[1].trim();
+  if (!text) return '';
+  // Try ```html ... ``` block (with optional leading whitespace)
+  let m = text.match(/```html\s*\n?([\s\S]*?)```/i);
+  if (m) return m[1].trim();
+  // Try ``` ... ``` block containing HTML
+  m = text.match(/```(?:\w*\s*\n?)?([\s\S]*?)```/i);
+  if (m && m[1] && m[1].includes('<')) return m[1].trim();
   // Try raw HTML (starts with <!DOCTYPE or <html or <div)
   const trimmed = text.trim();
   if (trimmed.match(/^<!DOCTYPE|<html|<div|<head|<body/i)) {
     return trimmed;
   }
-  // Fallback: return as-is
-  return trimmed;
+  // Try to find any HTML-like content
+  const htmlStart = text.search(/<!DOCTYPE|<html/i);
+  if (htmlStart >= 0) {
+    // Find the end (last > or </html>)
+    const sub = text.substring(htmlStart);
+    const endIdx = sub.lastIndexOf('</html>');
+    if (endIdx >= 0) return sub.substring(0, endIdx + 7).trim();
+    return sub.trim();
+  }
+  return '';
 }
 
 // ─── System prompts ──────────────────────────────────────────────────
@@ -106,18 +105,8 @@ Rules:
 3. Apply the requested changes precisely
 4. Return ONLY the HTML in a \`\`\`html block, followed by a brief explanation of what you changed.`;
 
-const TEST_SYSTEM = `You are an AI QA tester. You will receive screenshots of an educational HTML module
-rendered in a browser. Your job is to:
-1. Visually inspect the module for issues (broken layout, missing content, unreadable text, etc.)
-2. Describe what you see
-3. Identify any problems
-4. Suggest specific fixes
-
-Return a JSON object: {"issues": ["issue1", "issue2"], "overall": "good|needs_work|broken", "suggestions": ["fix1", "fix2"]}`;
-
 // ─── Playwright browser management ───────────────────────────────────
 let browser = null;
-let page = null;
 
 async function getBrowser() {
   if (!browser) {
@@ -134,7 +123,6 @@ async function getNewPage() {
 
 // ─── Routes ──────────────────────────────────────────────────────────
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -151,25 +139,35 @@ app.post('/generate', async (req, res) => {
 
     let messages;
     if (current_html) {
-      // Edit mode — include the current HTML
       messages = [
         { role: 'system', content: EDIT_SYSTEM },
         { role: 'user', content: `Here is the current module HTML:\n\n\`\`\`html\n${current_html}\n\`\`\`\n\nInstruction: ${prompt}` },
       ];
     } else {
-      // Generate mode
       messages = [
         { role: 'system', content: GENERATE_SYSTEM },
         { role: 'user', content: prompt },
       ];
     }
 
-    const aiResponse = await callKimi(messages);
-    const html = extractHtml(aiResponse);
-
-    // Extract the explanation (text after the HTML block)
-    let reply = aiResponse.replace(/```html\s*\n?[\s\S]*?```/i, '').trim();
+    const result = await callKimi(messages);
+    // Try content first, then reasoning (Kimi may put HTML in reasoning_content)
+    let html = extractHtml(result.content);
+    if (!html && result.reasoning) {
+      html = extractHtml(result.reasoning);
+    }
+    
+    let reply = result.content;
+    // Remove the HTML block from the reply to get just the explanation
+    reply = reply.replace(/```html\s*\n?[\s\S]*?```/gi, '').replace(/```[\s\S]*?```/gi, '').trim();
     if (!reply) reply = 'Module generated successfully. You can preview it below.';
+
+    if (!html) {
+      return res.status(500).json({ 
+        error: 'AI did not generate valid HTML. Please try again with a different prompt.',
+        raw_content: result.content.substring(0, 500),
+      });
+    }
 
     res.json({ html, reply });
   } catch (error) {
@@ -191,10 +189,20 @@ app.post('/edit', async (req, res) => {
       { role: 'user', content: `Here is the current module HTML:\n\n\`\`\`html\n${current_html}\n\`\`\`\n\nEdit instruction: ${instruction}` },
     ];
 
-    const aiResponse = await callKimi(messages);
-    const html = extractHtml(aiResponse);
-    let reply = aiResponse.replace(/```html\s*\n?[\s\S]*?```/i, '').trim();
+    const result = await callKimi(messages);
+    let html = extractHtml(result.content);
+    if (!html && result.reasoning) {
+      html = extractHtml(result.reasoning);
+    }
+    
+    let reply = result.content.replace(/```html\s*\n?[\s\S]*?```/gi, '').replace(/```[\s\S]*?```/gi, '').trim();
     if (!reply) reply = 'Module updated successfully.';
+
+    if (!html) {
+      return res.status(500).json({ 
+        error: 'AI did not generate valid HTML. Please try again.',
+      });
+    }
 
     res.json({ html, reply });
   } catch (error) {
@@ -205,42 +213,42 @@ app.post('/edit', async (req, res) => {
 
 // Load HTML into Playwright and return a screenshot
 app.post('/start', async (req, res) => {
+  let testPage;
   try {
     const { htmlContent } = req.body;
     if (!htmlContent) return res.status(400).json({ error: 'htmlContent required' });
 
-    page = await getNewPage();
-    await page.setContent(htmlContent, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(500);
+    testPage = await getNewPage();
+    await testPage.setContent(htmlContent, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+    await testPage.waitForTimeout(500);
 
-    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+    const screenshot = await testPage.screenshot({ encoding: 'base64', fullPage: false });
     res.json({ screenshot });
   } catch (error) {
     console.error('Start error:', error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (testPage) await testPage.close().catch(() => {});
   }
 });
 
 // Execute an action (click, type) and return new screenshot
+let activePage = null;
 app.post('/action', async (req, res) => {
   try {
     const { action, selector, text } = req.body;
-    if (!page) return res.status(400).json({ error: 'No active page. Call /start first.' });
+    if (!activePage) return res.status(400).json({ error: 'No active page. Call /start first.' });
 
     if (action === 'click') {
-      await page.click(selector);
+      await activePage.click(selector);
     } else if (action === 'type') {
-      await page.fill(selector, text);
+      await activePage.fill(selector, text);
     } else if (action === 'scroll') {
-      await page.evaluate(() => window.scrollBy(0, 500));
-    } else if (action === 'screenshot') {
-      // just take a screenshot
-    } else {
-      return res.status(400).json({ error: 'Unknown action: ' + action });
+      await activePage.evaluate(() => window.scrollBy(0, 500));
     }
 
-    await page.waitForTimeout(500);
-    const screenshot = await page.screenshot({ encoding: 'base64', fullPage: false });
+    await activePage.waitForTimeout(500);
+    const screenshot = await activePage.screenshot({ encoding: 'base64', fullPage: false });
     res.json({ success: true, screenshot });
   } catch (error) {
     console.error('Action error:', error.message);
@@ -248,56 +256,49 @@ app.post('/action', async (req, res) => {
   }
 });
 
-// AI autonomously tests a module — loads HTML, takes screenshot, sends to AI for analysis
+// AI autonomously tests a module
 app.post('/test', async (req, res) => {
+  let testPage;
   try {
     const { htmlContent } = req.body;
     if (!htmlContent) return res.status(400).json({ error: 'htmlContent required' });
 
-    const testPage = await getNewPage();
-    await testPage.setContent(htmlContent, { waitUntil: 'networkidle' });
+    testPage = await getNewPage();
+    await testPage.setContent(htmlContent, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
     await testPage.waitForTimeout(1000);
 
-    // Take a screenshot
     const screenshotBuffer = await testPage.screenshot({ type: 'png', fullPage: false });
     const screenshotB64 = screenshotBuffer.toString('base64');
 
-    // Send to AI for visual analysis (using the screenshot)
     const messages = [
-      { role: 'system', content: TEST_SYSTEM },
+      { role: 'system', content: 'You are an AI QA tester. Analyze this rendered HTML module screenshot. Return JSON: {"issues": [...], "overall": "good|needs_work|broken", "suggestions": [...]}' },
       {
         role: 'user',
         content: [
-          { type: 'text', text: 'Analyze this rendered HTML module screenshot. The HTML being tested is:\n\n' + htmlContent.substring(0, 3000) },
+          { type: 'text', text: 'Analyze this rendered HTML module. The HTML:\n\n' + htmlContent.substring(0, 3000) },
           { type: 'image_url', image_url: { url: `data:image/png;base64,${screenshotB64}` } },
         ],
       },
     ];
 
-    const aiResponse = await callKimi(messages, { max_tokens: 4096 });
-
+    const result = await callKimi(messages, { max_tokens: 4096 });
     let analysis;
     try {
-      // Try to parse JSON from the response
-      const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-      analysis = jsonMatch ? JSON.parse(jsonMatch[0]) : { issues: [], overall: 'unknown', suggestions: [], raw: aiResponse };
+      const jsonMatch = result.content.match(/\{[\s\S]*\}/);
+      analysis = jsonMatch ? JSON.parse(jsonMatch[0]) : { issues: [], overall: 'unknown', raw: result.content };
     } catch (e) {
-      analysis = { issues: [], overall: 'unknown', suggestions: [], raw: aiResponse };
+      analysis = { issues: [], overall: 'unknown', raw: result.content };
     }
 
-    await testPage.close();
-
-    res.json({
-      analysis,
-      screenshot: screenshotB64,
-    });
+    res.json({ analysis, screenshot: screenshotB64 });
   } catch (error) {
     console.error('Test error:', error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (testPage) await testPage.close().catch(() => {});
   }
 });
 
-// Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`AI Module Tester running on port ${PORT}`);
   console.log(`Kimi API: ${KIMI_API_KEY ? 'configured' : 'NOT configured'}`);
