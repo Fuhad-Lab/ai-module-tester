@@ -34,7 +34,7 @@ async function callKimi(messages, { max_tokens = 16384 } = {}) {
       temperature: 1.0,
       top_p: 1.0,
       stream: false,
-      chat_template_kwargs: { thinking: true },
+      chat_template_kwargs: { thinking: false },
     }),
   });
 
@@ -150,7 +150,7 @@ app.post('/generate', async (req, res) => {
       ];
     }
 
-    const result = await callKimi(messages);
+    const result = await callKimi(messages, { max_tokens: 8192 });
     // Try content first, then reasoning (Kimi may put HTML in reasoning_content)
     let html = extractHtml(result.content);
     if (!html && result.reasoning) {
