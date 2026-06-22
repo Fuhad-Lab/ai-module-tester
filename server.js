@@ -80,21 +80,26 @@ function extractHtml(text) {
 }
 
 // ─── System prompts ──────────────────────────────────────────────────
-const GENERATE_SYSTEM = `You are an expert educational content creator for Blue Horizon Schools.
-Your task is to create interactive, self-contained HTML learning modules for Nigerian secondary school students.
+const GENERATE_SYSTEM = `You are an educational web page designer. Create a visually appealing educational web page about the topic the user requests.
 
-Rules:
-1. Output a COMPLETE, self-contained HTML document (with <!DOCTYPE html>, <html>, <head>, <body>)
-2. Use inline CSS (in a <style> tag) — no external stylesheets
-3. Use vanilla JavaScript (in <script> tags) — no external libraries except CDN links for fonts/icons
-4. Make it interactive: quizzes, draggable elements, animations, expandable sections, etc.
-5. Use clear, age-appropriate language for JSS/SSS students
-6. Include: lesson title, learning objectives, main content with examples, interactive practice, summary
-7. Use Blue Horizon's navy color (#1f507b) as the primary color
-8. Make it responsive and visually appealing
-9. Return ONLY the HTML code in a \`\`\`html block, followed by a brief explanation
+Output requirements:
+- A complete HTML document with <!DOCTYPE html>, <html>, <head>, and <body> tags
+- CSS styles inside a <style> tag in the head
+- The page should be educational and suitable for secondary school students
+- Use the color #1f507b (navy blue) as the main color
+- Include a title, explanatory text, and a simple quiz with 2-3 questions
+- Wrap the entire HTML in a code block starting with \`\`\`html
 
-The module should be educational, engaging, and immediately usable in a browser.`;
+Example format:
+\`\`\`html
+<!DOCTYPE html>
+<html>
+<head><style>body{font-family:sans-serif;color:#1f507b}</style></head>
+<body><h1>Topic Title</h1><p>Explanation</p></body>
+</html>
+\`\`
+
+After the code block, write one sentence describing what you created.`;
 
 const EDIT_SYSTEM = `You are an expert educational content editor. You will be given existing HTML
 and an edit instruction. Return the COMPLETE updated HTML document with the changes applied.
