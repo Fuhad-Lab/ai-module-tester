@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ai-module-tester
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: KIMI_API_KEY
+        sync: false  # Set this manually in Render dashboard
+      - key: PORT
+        value: 3000
+    healthCheckPath: /health

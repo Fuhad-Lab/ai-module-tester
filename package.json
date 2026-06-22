@@ -1,0 +1,19 @@
+{
+  "name": "ai-module-tester",
+  "version": "1.0.0",
+  "description": "AI-powered module creator and tester for Blue Horizon e-learning. Uses Kimi K2.6 for generation and Playwright for visual testing.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.45.0",
+    "cors": "^2.8.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
